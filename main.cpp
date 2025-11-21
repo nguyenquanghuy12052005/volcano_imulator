@@ -4,6 +4,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include "particle_system.h"  // Thêm include cho hệ thống hạt
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -350,6 +351,9 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
             std::cout << "Che do: " << (isWireframe ? "Khung Day (Wireframe)" : "Mat Da Giac (Solid)") << std::endl;
         }
 
+        // Xử lý input cho hệ thống hạt
+        particleSystem.handleInput(key);
+
         // Thoát
         if (key == GLFW_KEY_ESCAPE)
         {
@@ -361,7 +365,7 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
 //  Xử lý các phím giữ (Di chuyển) 
 void processInput(GLFWwindow *window)
 {
-    float moveSpeed = 0.01f;  
+    float moveSpeed = 0.1f;  
     float rotSpeed = 0.01f;   
     float zoomSpeed = 0.01f;  
 
@@ -392,16 +396,20 @@ void processInput(GLFWwindow *window)
     if(rotationX<-1.5f) rotationX=-1.5f;
 }
 
-
 int main(){
     if(!glfwInit()){return -1;}
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);
     glfwWindowHint(GLFW_OPENGL_PROFILE,GLFW_OPENGL_CORE_PROFILE);
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH,SCR_HEIGHT,"Nui Lua 3D",NULL,NULL);
+    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH,SCR_HEIGHT,"Nui Lua 3D + He Thong Hat",NULL,NULL);
     if(!window){glfwTerminate();return -1;}
     glfwMakeContextCurrent(window);
     if(glewInit()!=GLEW_OK){return -1;}
+
+    // Khởi tạo hệ thống hạt
+    particleSystem.init();
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     createDetailedVolcano();
     createLavaPlane();
@@ -415,14 +423,31 @@ int main(){
 
     glEnable(GL_DEPTH_TEST);
 
+    double lastTime = glfwGetTime();
+
     while(!glfwWindowShouldClose(window)){
+        // Tính delta time
+        double currentTime = glfwGetTime();
+        float deltaTime = currentTime - lastTime;
+        lastTime = currentTime;
+
         processInput(window);
         
         glClearColor(0.2f,0.2f,0.2f,1.0f);
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
 
+        // Cập nhật hệ thống hạt - phun từ miệng núi lửa (0, 2.5, 0)
+        particleSystem.update(deltaTime, 0.0f, 2.5f, 0.0f);
+
         glUseProgram(shaderProgram);
         glBindVertexArray(VAO);
+
+        // Chế độ wireframe
+        if (isWireframe) {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        } else {
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        }
 
         // MODEL Matrix (Xoay và Phóng to vật thể)
         Matrix4x4 rotMat = rotateXY(rotationX, rotationY);
@@ -462,8 +487,11 @@ int main(){
         // Gửi ma trận lên Shader
         glUniformMatrix4fv(glGetUniformLocation(shaderProgram,"uTransform"),1,GL_FALSE, finalMat.m);
         
-        //  Vẽ vật thể
+        // Vẽ núi lửa
         glDrawArrays(GL_TRIANGLES,0,vertices.size()/3);
+
+        // Vẽ hệ thống hạt (sử dụng cùng ma trận transform)
+        particleSystem.render(finalMat.m);
 
         glfwSwapBuffers(window);
         glfwPollEvents();
