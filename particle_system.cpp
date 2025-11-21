@@ -283,4 +283,207 @@ int main() {
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     GLFWwindow* win = glfwCreateWindow(
-        WINDOW_WIDTH, WINDOW_HEIGH
+        WINDOW_WIDTH, WINDOW_HEIGHT,
+        "Volcano + Smoke (OpenGL Particle System)", nullptr, nullptr
+    );
+
+    if (!win) {
+        cerr << "Window creation failed\n";
+        glfwTerminate();
+        return -1;
+    }
+
+    glfwMakeContextCurrent(win);
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        cerr << "Failed to load GL via GLAD\n";
+        return -1;
+    }
+
+    cout << "GL Version: " << glGetString(GL_VERSION) << endl;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_PROGRAM_POINT_SIZE);
+
+    GLuint prog = createProgram();
+    glUseProgram(prog);
+
+    // === VAO / VBO ===
+    GLuint vao, vbo;
+    glGenVertexArrays(1, &vao);
+    glGenBuffers(1, &vbo);
+
+    glBindVertexArray(vao);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
+    constexpr int ELEM = 8; // (pos2 + size1 + color4 + life1)
+    int count = MAX_PARTICLES + MAX_SMOKE;
+
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float)*ELEM*count, nullptr, GL_STREAM_DRAW);
+
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, ELEM*sizeof(float), (void*)0);
+
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, ELEM*sizeof(float), (void*)(2*sizeof(float)));
+
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, ELEM*sizeof(float), (void*)(3*sizeof(float)));
+
+    glEnableVertexAttribArray(3);
+    glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, ELEM*sizeof(float), (void*)(7*sizeof(float)));
+
+    glBindVertexArray(0);
+
+    // Projection
+    float proj[16];
+    orthoMat(-WINDOW_WIDTH/2, WINDOW_WIDTH/2, -WINDOW_HEIGHT/2, WINDOW_HEIGHT/2, -1, 1, proj);
+
+    GLint locProj = glGetUniformLocation(prog, "uProj");
+    glUseProgram(prog);
+    glUniformMatrix4fv(locProj, 1, GL_FALSE, proj);
+
+    initParticles();
+
+    // KEY EVENTS
+    glfwSetKeyCallback(win, [](GLFWwindow* w, int key, int sc, int action, int mods){
+        if (action != GLFW_PRESS) return;
+
+        if (key == GLFW_KEY_ESCAPE) glfwSetWindowShouldClose(w, 1);
+
+        if (key == GLFW_KEY_SPACE) {
+            emitting = !emitting;
+            cout << "Emitting: " << (emitting ? "ON" : "OFF") << endl;
+        }
+
+        if (key == GLFW_KEY_C) {
+            for (auto &p : lavaParticles) p.alive = false;
+            for (auto &s : smokeParticles) s.alive = false;
+            cout << "Cleared\n";
+        }
+
+        if (key == GLFW_KEY_EQUAL) {
+            baseEmitRate = min(baseEmitRate+50, 5000);
+            cout << "EmitRate: " << baseEmitRate << endl;
+        }
+
+        if (key == GLFW_KEY_MINUS) {
+            baseEmitRate = max(baseEmitRate-50, 0);
+            cout << "EmitRate: " << baseEmitRate << endl;
+        }
+
+        if (key == GLFW_KEY_LEFT_BRACKET) {
+            eruptionPower = max(0.1f, eruptionPower - 0.1f);
+            cout << "EruptionPower: " << eruptionPower << endl;
+        }
+
+        if (key == GLFW_KEY_RIGHT_BRACKET) {
+            eruptionPower = min(5.0f, eruptionPower + 0.1f);
+            cout << "EruptionPower: " << eruptionPower << endl;
+        }
+
+        if (key == GLFW_KEY_K) {
+            globalSizeMul = max(0.1f, globalSizeMul - 0.1f);
+            cout << "SizeMul: " << globalSizeMul << endl;
+        }
+
+        if (key == GLFW_KEY_L) {
+            globalSizeMul = min(5.0f, globalSizeMul + 0.1f);
+            cout << "SizeMul: " << globalSizeMul << endl;
+        }
+
+        if (key == GLFW_KEY_S) {
+            static bool smokeOn = true;
+            smokeOn = !smokeOn;
+
+            if (!smokeOn) {
+                for (auto &s : smokeParticles) s.alive = false;
+                cout << "Smoke OFF\n";
+            } else cout << "Smoke ON\n";
+        }
+    });
+
+    float last = glfwGetTime();
+
+    vector<float> gpuBuf(ELEM * count);
+
+    while (!glfwWindowShouldClose(win)) {
+        float now = glfwGetTime();
+        float dt = now - last;
+        last = now;
+
+        if (dt > 0.05f) dt = 0.05f;
+
+        updateParticles(dt);
+
+        int idx = 0;
+
+        // LAVA
+        for (auto &p : lavaParticles) {
+            if (!p.alive) {
+                for (int i=0;i<ELEM;i++) gpuBuf[idx++] = 0.0f;
+                continue;
+            }
+
+            float lifeRatio = p.life / p.maxLife;
+
+            float r, g, b, a;
+            if (lifeRatio > 0.8f) { r=1; g=1; b=0.2; a=1; }
+            else if (lifeRatio > 0.5f) { r=1; g=0.5; b=0; a=1; }
+            else if (lifeRatio > 0.2f) { r=0.6; g=0.1; b=0.1; a=1; }
+            else { r=0.3; g=0.3; b=0.3; a=max(0.0f, lifeRatio*3.0f); }
+
+            gpuBuf[idx++] = p.pos.x;
+            gpuBuf[idx++] = p.pos.y;
+            gpuBuf[idx++] = p.size * globalSizeMul;
+            gpuBuf[idx++] = r;
+            gpuBuf[idx++] = g;
+            gpuBuf[idx++] = b;
+            gpuBuf[idx++] = a;
+            gpuBuf[idx++] = lifeRatio;
+        }
+
+        // SMOKE
+        for (auto &s : smokeParticles) {
+            if (!s.alive) {
+                for (int i=0;i<ELEM;i++) gpuBuf[idx++] = 0.0f;
+                continue;
+            }
+
+            float lifeRatio = s.life / s.maxLife;
+
+            gpuBuf[idx++] = s.pos.x;
+            gpuBuf[idx++] = s.pos.y;
+            gpuBuf[idx++] = s.size;
+            gpuBuf[idx++] = s.r;
+            gpuBuf[idx++] = s.g;
+            gpuBuf[idx++] = s.b;
+            gpuBuf[idx++] = s.a;
+            gpuBuf[idx++] = lifeRatio;
+        }
+
+        // UPLOAD GPU
+        glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(float)*gpuBuf.size(), nullptr, GL_STREAM_DRAW);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(float)*gpuBuf.size(), gpuBuf.data());
+
+        glClearColor(1,1,1,1);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(prog);
+        glBindVertexArray(vao);
+        glDrawArrays(GL_POINTS, 0, count);
+
+        glfwSwapBuffers(win);
+        glfwPollEvents();
+    }
+
+    glDeleteProgram(prog);
+    glDeleteBuffers(1, &vbo);
+    glDeleteVertexArrays(1, &vao);
+
+    glfwDestroyWindow(win);
+    glfwTerminate();
+    return 0;
+}
